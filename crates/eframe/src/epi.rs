@@ -648,6 +648,96 @@ impl std::str::FromStr for Renderer {
 
 // ----------------------------------------------------------------------------
 
+/// A numpad key event captured before egui-winit processes it.
+///
+/// This preserves the distinction between numpad keys and regular keys,
+/// which egui-winit normally merges together. Use this to implement
+/// numpad-specific keybinds in your application.
+///
+/// The `numlock_on` field indicates whether NumLock was active when the key
+/// was pressed. When NumLock is ON, numpad keys produce digits (0-9) and
+/// should typically be passed to text input. When NumLock is OFF, numpad
+/// keys can be used for navigation or custom keybinds.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug, Clone)]
+pub struct NumpadKeyEvent {
+    /// The physical key that was pressed (e.g., `Numpad1`, `NumpadAdd`).
+    pub physical_key: winit::keyboard::PhysicalKey,
+
+    /// Whether NumLock was active (derived from logical_key being a character).
+    /// When true, the key should produce a digit/character for text input.
+    /// When false, the key can trigger keybinds.
+    pub numlock_on: bool,
+
+    /// Whether the key was pressed or released.
+    pub pressed: bool,
+
+    /// Active modifier keys (Ctrl, Shift, Alt, etc.)
+    pub modifiers: egui::Modifiers,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl NumpadKeyEvent {
+    /// Returns the keybind name for this numpad key (e.g., "num_1", "num_plus").
+    /// Returns None if NumLock is on (key should go to text input instead).
+    pub fn keybind_name(&self) -> Option<&'static str> {
+        if self.numlock_on {
+            return None;
+        }
+
+        use winit::keyboard::{KeyCode, PhysicalKey};
+        match self.physical_key {
+            PhysicalKey::Code(KeyCode::Numpad0) => Some("num_0"),
+            PhysicalKey::Code(KeyCode::Numpad1) => Some("num_1"),
+            PhysicalKey::Code(KeyCode::Numpad2) => Some("num_2"),
+            PhysicalKey::Code(KeyCode::Numpad3) => Some("num_3"),
+            PhysicalKey::Code(KeyCode::Numpad4) => Some("num_4"),
+            PhysicalKey::Code(KeyCode::Numpad5) => Some("num_5"),
+            PhysicalKey::Code(KeyCode::Numpad6) => Some("num_6"),
+            PhysicalKey::Code(KeyCode::Numpad7) => Some("num_7"),
+            PhysicalKey::Code(KeyCode::Numpad8) => Some("num_8"),
+            PhysicalKey::Code(KeyCode::Numpad9) => Some("num_9"),
+            PhysicalKey::Code(KeyCode::NumpadAdd) => Some("num_plus"),
+            PhysicalKey::Code(KeyCode::NumpadSubtract) => Some("num_minus"),
+            PhysicalKey::Code(KeyCode::NumpadMultiply) => Some("num_multiply"),
+            PhysicalKey::Code(KeyCode::NumpadDivide) => Some("num_divide"),
+            PhysicalKey::Code(KeyCode::NumpadEnter) => Some("num_enter"),
+            PhysicalKey::Code(KeyCode::NumpadDecimal) => Some("num_decimal"),
+            _ => None,
+        }
+    }
+
+    /// Returns the character this key would produce when NumLock is on.
+    /// Returns None if NumLock is off or if the key doesn't produce a character.
+    pub fn to_char(&self) -> Option<char> {
+        if !self.numlock_on {
+            return None;
+        }
+
+        use winit::keyboard::{KeyCode, PhysicalKey};
+        match self.physical_key {
+            PhysicalKey::Code(KeyCode::Numpad0) => Some('0'),
+            PhysicalKey::Code(KeyCode::Numpad1) => Some('1'),
+            PhysicalKey::Code(KeyCode::Numpad2) => Some('2'),
+            PhysicalKey::Code(KeyCode::Numpad3) => Some('3'),
+            PhysicalKey::Code(KeyCode::Numpad4) => Some('4'),
+            PhysicalKey::Code(KeyCode::Numpad5) => Some('5'),
+            PhysicalKey::Code(KeyCode::Numpad6) => Some('6'),
+            PhysicalKey::Code(KeyCode::Numpad7) => Some('7'),
+            PhysicalKey::Code(KeyCode::Numpad8) => Some('8'),
+            PhysicalKey::Code(KeyCode::Numpad9) => Some('9'),
+            PhysicalKey::Code(KeyCode::NumpadAdd) => Some('+'),
+            PhysicalKey::Code(KeyCode::NumpadSubtract) => Some('-'),
+            PhysicalKey::Code(KeyCode::NumpadMultiply) => Some('*'),
+            PhysicalKey::Code(KeyCode::NumpadDivide) => Some('/'),
+            PhysicalKey::Code(KeyCode::NumpadDecimal) => Some('.'),
+            _ => None,
+        }
+    }
+}
+
+// ----------------------------------------------------------------------------
+
 /// Represents the surroundings of your app.
 ///
 /// It provides methods to inspect the surroundings (are we on the web?),
@@ -684,6 +774,11 @@ pub struct Frame {
     /// Raw platform display handle for window
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) raw_display_handle: Result<RawDisplayHandle, HandleError>,
+
+    /// Numpad key events captured this frame, before egui-winit processes them.
+    /// This preserves the distinction between numpad keys and regular number keys.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) numpad_keys: Vec<NumpadKeyEvent>,
 }
 
 // Implementing `Clone` would violate the guarantees of `HasWindowHandle` and `HasDisplayHandle`.
@@ -727,7 +822,46 @@ impl Frame {
             storage: None,
             #[cfg(feature = "wgpu_no_default_features")]
             wgpu_render_state: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            numpad_keys: Vec::new(),
         }
+    }
+
+    /// Returns numpad key events captured this frame.
+    ///
+    /// These events are captured before egui-winit processes them, preserving
+    /// the distinction between numpad keys and regular number keys.
+    ///
+    /// Use this to implement numpad-specific keybinds:
+    /// - When `numlock_on` is false, use `keybind_name()` to get the keybind (e.g., "num_1")
+    /// - When `numlock_on` is true, use `to_char()` to get the character for text input
+    ///
+    /// # Example
+    /// ```ignore
+    /// fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+    ///     for key in frame.numpad_keys() {
+    ///         if !key.pressed { continue; }
+    ///         if let Some(name) = key.keybind_name() {
+    ///             // NumLock is off - execute keybind
+    ///             if let Some(cmd) = self.keybinds.get(name) {
+    ///                 self.execute(cmd);
+    ///             }
+    ///         } else if let Some(ch) = key.to_char() {
+    ///             // NumLock is on - insert character
+    ///             self.input.insert(ch);
+    ///         }
+    ///     }
+    /// }
+    /// ```
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn numpad_keys(&self) -> &[NumpadKeyEvent] {
+        &self.numpad_keys
+    }
+
+    /// Clears the numpad key events. Called internally after each frame.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn clear_numpad_keys(&mut self) {
+        self.numpad_keys.clear();
     }
 
     /// True if you are in a web environment.

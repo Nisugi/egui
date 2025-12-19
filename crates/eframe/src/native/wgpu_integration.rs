@@ -931,6 +931,61 @@ impl WgpuWinitRunning<'_> {
                 }
             }
 
+            // Intercept numpad key events before egui-winit processes them.
+            // This preserves the KeyLocation::Numpad information that egui-winit loses.
+            winit::event::WindowEvent::KeyboardInput {
+                event:
+                    winit::event::KeyEvent {
+                        physical_key,
+                        logical_key,
+                        state,
+                        location: winit::keyboard::KeyLocation::Numpad,
+                        ..
+                    },
+                ..
+            } => {
+                use winit::keyboard::{Key, KeyCode, PhysicalKey};
+
+                // Check if this is a numpad key we care about
+                let is_numpad_key = matches!(
+                    physical_key,
+                    PhysicalKey::Code(
+                        KeyCode::Numpad0
+                            | KeyCode::Numpad1
+                            | KeyCode::Numpad2
+                            | KeyCode::Numpad3
+                            | KeyCode::Numpad4
+                            | KeyCode::Numpad5
+                            | KeyCode::Numpad6
+                            | KeyCode::Numpad7
+                            | KeyCode::Numpad8
+                            | KeyCode::Numpad9
+                            | KeyCode::NumpadAdd
+                            | KeyCode::NumpadSubtract
+                            | KeyCode::NumpadMultiply
+                            | KeyCode::NumpadDivide
+                            | KeyCode::NumpadEnter
+                            | KeyCode::NumpadDecimal
+                    )
+                );
+
+                if is_numpad_key {
+                    // NumLock state: Character variant means NumLock is ON
+                    let numlock_on = matches!(logical_key, Key::Character(_));
+
+                    let numpad_event = crate::epi::NumpadKeyEvent {
+                        physical_key: *physical_key,
+                        numlock_on,
+                        pressed: *state == winit::event::ElementState::Pressed,
+                        modifiers: integration.egui_ctx.input(|i| i.modifiers),
+                    };
+
+                    integration.frame.numpad_keys.push(numpad_event);
+                }
+                // Don't return early - let egui-winit also process the event
+                // so that NumLock ON mode can input characters
+            }
+
             _ => {}
         }
 

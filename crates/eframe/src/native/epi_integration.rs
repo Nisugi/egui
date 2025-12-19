@@ -195,6 +195,7 @@ impl EpiIntegration {
             window: Some(Arc::clone(window)),
             raw_display_handle: window.display_handle().map(|h| h.as_raw()),
             raw_window_handle: window.window_handle().map(|h| h.as_raw()),
+            numpad_keys: Vec::new(),
         };
 
         let icon = native_options
@@ -310,6 +311,10 @@ impl EpiIntegration {
                 self.close = true;
             }
         }
+
+        // Clear numpad keys after each frame - they've been processed by the app
+        #[cfg(not(target_arch = "wasm32"))]
+        self.frame.clear_numpad_keys();
 
         self.pending_full_output.append(full_output);
         std::mem::take(&mut self.pending_full_output)
