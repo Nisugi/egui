@@ -926,8 +926,22 @@ impl GlowWinitRunning<'_> {
                 );
 
                 if is_numpad_key {
-                    // NumLock state: Character variant means NumLock is ON
-                    let numlock_on = matches!(logical_key, Key::Character(_));
+                    // Operator keys (+, -, *, /) don't change with NumLock - they always produce
+                    // the same character. We treat them as always "NumLock OFF" so they trigger
+                    // keybinds regardless of actual NumLock state.
+                    let is_operator_key = matches!(
+                        physical_key,
+                        PhysicalKey::Code(
+                            KeyCode::NumpadAdd
+                                | KeyCode::NumpadSubtract
+                                | KeyCode::NumpadMultiply
+                                | KeyCode::NumpadDivide
+                        )
+                    );
+
+                    // For digit keys: logical_key is Character when NumLock ON, Named when OFF
+                    // For operator keys: always treat as NumLock OFF (trigger keybinds)
+                    let numlock_on = !is_operator_key && matches!(logical_key, Key::Character(_));
 
                     let numpad_event = crate::epi::NumpadKeyEvent {
                         physical_key: *physical_key,
@@ -937,9 +951,14 @@ impl GlowWinitRunning<'_> {
                     };
 
                     self.integration.frame.numpad_keys.push(numpad_event);
+
+                    // When NumLock is OFF, consume the event so egui-winit doesn't
+                    // also process it as arrow/navigation keys (which causes double-action)
+                    // When NumLock is ON, let egui-winit process it for character input
+                    if !numlock_on {
+                        return EventResult::RepaintNow(window_id);
+                    }
                 }
-                // Don't return early - let egui-winit also process the event
-                // so that NumLock ON mode can input characters
             }
 
             _ => {}
