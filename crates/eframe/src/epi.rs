@@ -648,92 +648,243 @@ impl std::str::FromStr for Renderer {
 
 // ----------------------------------------------------------------------------
 
+/// Controls how eframe intercepts numpad keys before egui-winit processes them.
+///
+/// Set via [`Frame::set_numpad_capture_mode`]. Captured events never reach egui
+/// (no text insertion, no navigation) and are exposed through [`Frame::numpad_keys`]
+/// so the application can run its own keybinds.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum NumpadCaptureMode {
+    /// Don't intercept anything; numpad keys behave as in stock eframe/egui.
+    Off,
+
+    /// Capture digits and decimal when `NumLock` is OFF (they'd otherwise act as
+    /// arrow/Home/End navigation); pass them through for text input when `NumLock` is ON.
+    /// Operators (`+ - * /`) and `NumpadEnter` are always captured, since their produced
+    /// character/action doesn't depend on `NumLock`.
+    ///
+    /// This is the default, and matches Wrayth-style behavior on Windows/Linux.
+    /// Note: macOS has no `NumLock`, so digits are never captured there — use
+    /// [`Self::Always`] on macOS if you want numpad keybinds.
+    #[default]
+    NumLockAware,
+
+    /// Always capture all 16 numpad keys for keybinds, regardless of `NumLock` state.
+    /// With this mode the numpad can never be used for text input, so it is best
+    /// offered as a user setting. This is the only way to get numpad digit keybinds
+    /// on macOS (which has no `NumLock`).
+    Always,
+}
+
 /// A numpad key event captured before egui-winit processes it.
 ///
 /// This preserves the distinction between numpad keys and regular keys,
 /// which egui-winit normally merges together. Use this to implement
 /// numpad-specific keybinds in your application.
 ///
-/// The `numlock_on` field indicates whether NumLock was active when the key
-/// was pressed. When NumLock is ON, numpad keys produce digits (0-9) and
-/// should typically be passed to text input. When NumLock is OFF, numpad
-/// keys can be used for navigation or custom keybinds.
+/// The `consumed` field says whether eframe swallowed the event (egui never saw it).
+/// Only consumed events should trigger keybinds — see [`Self::keybind_name`].
+/// Events with `consumed == false` were also processed normally by egui (e.g. the
+/// digit was inserted into a focused `TextEdit`), so do NOT insert text for them.
 #[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug, Clone)]
 pub struct NumpadKeyEvent {
     /// The physical key that was pressed (e.g., `Numpad1`, `NumpadAdd`).
     pub physical_key: winit::keyboard::PhysicalKey,
 
-    /// Whether NumLock was active (derived from logical_key being a character).
-    /// When true, the key should produce a digit/character for text input.
-    /// When false, the key can trigger keybinds.
-    pub numlock_on: bool,
+    /// True if eframe consumed this event, meaning egui never processed it.
+    /// Consumed events are the ones that should trigger application keybinds.
+    /// Non-consumed events were passed through to egui for normal handling
+    /// (text input, widget interaction) and are exposed here for information only.
+    pub consumed: bool,
+
+    /// Whether `NumLock` was active, when it can be inferred from the event.
+    /// Only meaningful for digits and decimal (`Some(true)`/`Some(false)`);
+    /// `None` for operators and `NumpadEnter`, whose logical key doesn't depend
+    /// on `NumLock`. Always `Some(true)` on macOS, which has no `NumLock`.
+    pub numlock_on: Option<bool>,
 
     /// Whether the key was pressed or released.
     pub pressed: bool,
 
+    /// True if this event is an OS auto-repeat of a held key.
+    /// Check this if a keybind should fire once per physical keystroke.
+    pub repeat: bool,
+
     /// Active modifier keys (Ctrl, Shift, Alt, etc.)
     pub modifiers: egui::Modifiers,
+
+    /// The character this key produces according to the active keyboard layout
+    /// (e.g. `'5'`, `'+'`, or `','` for the decimal key on some locales).
+    /// `None` for `NumpadEnter` and for digit/decimal keys while `NumLock` is OFF.
+    pub character: Option<char>,
+}
+
+/// The keybind name for a numpad key code (e.g. "`num_1`", "`num_plus`"),
+/// or `None` if it isn't one of the 16 numpad keys we support.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn numpad_keybind_name(code: winit::keyboard::KeyCode) -> Option<&'static str> {
+    use winit::keyboard::KeyCode;
+    match code {
+        KeyCode::Numpad0 => Some("num_0"),
+        KeyCode::Numpad1 => Some("num_1"),
+        KeyCode::Numpad2 => Some("num_2"),
+        KeyCode::Numpad3 => Some("num_3"),
+        KeyCode::Numpad4 => Some("num_4"),
+        KeyCode::Numpad5 => Some("num_5"),
+        KeyCode::Numpad6 => Some("num_6"),
+        KeyCode::Numpad7 => Some("num_7"),
+        KeyCode::Numpad8 => Some("num_8"),
+        KeyCode::Numpad9 => Some("num_9"),
+        KeyCode::NumpadAdd => Some("num_plus"),
+        KeyCode::NumpadSubtract => Some("num_minus"),
+        KeyCode::NumpadMultiply => Some("num_multiply"),
+        KeyCode::NumpadDivide => Some("num_divide"),
+        KeyCode::NumpadEnter => Some("num_enter"),
+        KeyCode::NumpadDecimal => Some("num_decimal"),
+        _ => None,
+    }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
 impl NumpadKeyEvent {
-    /// Returns the keybind name for this numpad key (e.g., "num_1", "num_plus").
-    /// Returns None if NumLock is on (key should go to text input instead).
+    /// Returns the keybind name for this numpad key (e.g., "`num_1`", "`num_plus`").
+    ///
+    /// Returns `None` if the event was not consumed by eframe — in that case egui
+    /// already handled the key normally (e.g. as text input), so no keybind should fire.
     pub fn keybind_name(&self) -> Option<&'static str> {
-        if self.numlock_on {
+        if !self.consumed {
             return None;
         }
 
-        use winit::keyboard::{KeyCode, PhysicalKey};
         match self.physical_key {
-            PhysicalKey::Code(KeyCode::Numpad0) => Some("num_0"),
-            PhysicalKey::Code(KeyCode::Numpad1) => Some("num_1"),
-            PhysicalKey::Code(KeyCode::Numpad2) => Some("num_2"),
-            PhysicalKey::Code(KeyCode::Numpad3) => Some("num_3"),
-            PhysicalKey::Code(KeyCode::Numpad4) => Some("num_4"),
-            PhysicalKey::Code(KeyCode::Numpad5) => Some("num_5"),
-            PhysicalKey::Code(KeyCode::Numpad6) => Some("num_6"),
-            PhysicalKey::Code(KeyCode::Numpad7) => Some("num_7"),
-            PhysicalKey::Code(KeyCode::Numpad8) => Some("num_8"),
-            PhysicalKey::Code(KeyCode::Numpad9) => Some("num_9"),
-            PhysicalKey::Code(KeyCode::NumpadAdd) => Some("num_plus"),
-            PhysicalKey::Code(KeyCode::NumpadSubtract) => Some("num_minus"),
-            PhysicalKey::Code(KeyCode::NumpadMultiply) => Some("num_multiply"),
-            PhysicalKey::Code(KeyCode::NumpadDivide) => Some("num_divide"),
-            PhysicalKey::Code(KeyCode::NumpadEnter) => Some("num_enter"),
-            PhysicalKey::Code(KeyCode::NumpadDecimal) => Some("num_decimal"),
-            _ => None,
+            winit::keyboard::PhysicalKey::Code(code) => numpad_keybind_name(code),
+            winit::keyboard::PhysicalKey::Unidentified(_) => None,
         }
     }
 
-    /// Returns the character this key would produce when NumLock is on.
-    /// Returns None if NumLock is off or if the key doesn't produce a character.
+    /// The character this key produces according to the active keyboard layout.
+    ///
+    /// If `consumed` is false, egui already inserted this character into any focused
+    /// text widget — do not insert it again. If `consumed` is true (e.g. in
+    /// [`NumpadCaptureMode::Always`]), the application may use this to forward the
+    /// character itself, e.g. when no keybind is configured for the key.
     pub fn to_char(&self) -> Option<char> {
-        if !self.numlock_on {
-            return None;
-        }
-
-        use winit::keyboard::{KeyCode, PhysicalKey};
-        match self.physical_key {
-            PhysicalKey::Code(KeyCode::Numpad0) => Some('0'),
-            PhysicalKey::Code(KeyCode::Numpad1) => Some('1'),
-            PhysicalKey::Code(KeyCode::Numpad2) => Some('2'),
-            PhysicalKey::Code(KeyCode::Numpad3) => Some('3'),
-            PhysicalKey::Code(KeyCode::Numpad4) => Some('4'),
-            PhysicalKey::Code(KeyCode::Numpad5) => Some('5'),
-            PhysicalKey::Code(KeyCode::Numpad6) => Some('6'),
-            PhysicalKey::Code(KeyCode::Numpad7) => Some('7'),
-            PhysicalKey::Code(KeyCode::Numpad8) => Some('8'),
-            PhysicalKey::Code(KeyCode::Numpad9) => Some('9'),
-            PhysicalKey::Code(KeyCode::NumpadAdd) => Some('+'),
-            PhysicalKey::Code(KeyCode::NumpadSubtract) => Some('-'),
-            PhysicalKey::Code(KeyCode::NumpadMultiply) => Some('*'),
-            PhysicalKey::Code(KeyCode::NumpadDivide) => Some('/'),
-            PhysicalKey::Code(KeyCode::NumpadDecimal) => Some('.'),
-            _ => None,
-        }
+        self.character
     }
+}
+
+/// The kind of numpad key, used to decide capture policy.
+#[cfg(not(target_arch = "wasm32"))]
+enum NumpadKeyKind {
+    /// `Numpad0`–`Numpad9`: produce digits with `NumLock` ON, navigation with `NumLock` OFF.
+    Digit,
+    /// `NumpadDecimal`: produces `.`/`,` with `NumLock` ON, Delete with `NumLock` OFF.
+    Decimal,
+    /// `+ - * /`: always produce the same character, unaffected by `NumLock`.
+    Operator,
+    /// `NumpadEnter`: always acts as Enter, unaffected by `NumLock`.
+    Enter,
+}
+
+/// Decides whether a winit keyboard event is a numpad key we intercept,
+/// and builds the [`NumpadKeyEvent`] for it.
+///
+/// Returns `None` if the event should be handled entirely by the normal
+/// egui-winit path. If `Some`, the event must be pushed to [`Frame::numpad_keys`];
+/// if additionally `.consumed` is true, the event must NOT be forwarded to egui-winit.
+#[cfg(not(target_arch = "wasm32"))]
+#[expect(clippy::fn_params_excessive_bools, clippy::too_many_arguments)]
+pub(crate) fn intercept_numpad_key(
+    physical_key: winit::keyboard::PhysicalKey,
+    logical_key: &winit::keyboard::Key,
+    location: winit::keyboard::KeyLocation,
+    pressed: bool,
+    repeat: bool,
+    is_synthetic: bool,
+    modifiers: egui::Modifiers,
+    mode: NumpadCaptureMode,
+    capture_keys: Option<&std::collections::HashSet<String>>,
+) -> Option<NumpadKeyEvent> {
+    use winit::keyboard::{Key, KeyCode, KeyLocation, PhysicalKey};
+
+    if mode == NumpadCaptureMode::Off || location != KeyLocation::Numpad {
+        return None;
+    }
+
+    // Mirror egui-winit: ignore synthetic key presses (e.g. sent by Windows for keys
+    // already held when the window gains focus), so they can't fire spurious keybinds.
+    if is_synthetic && pressed {
+        return None;
+    }
+
+    let PhysicalKey::Code(code) = physical_key else {
+        return None;
+    };
+
+    let kind = match code {
+        KeyCode::Numpad0
+        | KeyCode::Numpad1
+        | KeyCode::Numpad2
+        | KeyCode::Numpad3
+        | KeyCode::Numpad4
+        | KeyCode::Numpad5
+        | KeyCode::Numpad6
+        | KeyCode::Numpad7
+        | KeyCode::Numpad8
+        | KeyCode::Numpad9 => NumpadKeyKind::Digit,
+        KeyCode::NumpadDecimal => NumpadKeyKind::Decimal,
+        KeyCode::NumpadAdd
+        | KeyCode::NumpadSubtract
+        | KeyCode::NumpadMultiply
+        | KeyCode::NumpadDivide => NumpadKeyKind::Operator,
+        KeyCode::NumpadEnter => NumpadKeyKind::Enter,
+        _ => return None,
+    };
+
+    // Digits/decimal produce a `Character` logical key when NumLock is ON and a
+    // `Named` key (End, Down, Delete, …) when it is OFF. Operators and Enter don't
+    // change with NumLock, so their state can't be inferred from the event.
+    let numlock_on = match kind {
+        NumpadKeyKind::Digit | NumpadKeyKind::Decimal => {
+            Some(matches!(logical_key, Key::Character(_)))
+        }
+        NumpadKeyKind::Operator | NumpadKeyKind::Enter => None,
+    };
+
+    let consumed = match mode {
+        NumpadCaptureMode::Off => unreachable!("handled above"),
+        NumpadCaptureMode::Always => true,
+        NumpadCaptureMode::NumLockAware => match kind {
+            // With NumLock OFF these would double as navigation keys — capture them.
+            // With NumLock ON they type digits — let egui handle them.
+            NumpadKeyKind::Digit | NumpadKeyKind::Decimal => numlock_on == Some(false),
+            NumpadKeyKind::Operator | NumpadKeyKind::Enter => true,
+        },
+    };
+
+    // If the app registered the set of keys it actually has bindings for, only
+    // consume those; unbound keys keep their native behavior (typing, Enter, …).
+    let consumed = consumed
+        && capture_keys.is_none_or(|keys| {
+            numpad_keybind_name(code).is_some_and(|name| keys.contains(name))
+        });
+
+    let character = match logical_key {
+        Key::Character(s) => s.chars().next(),
+        _ => None,
+    };
+
+    Some(NumpadKeyEvent {
+        physical_key,
+        consumed,
+        numlock_on,
+        pressed,
+        repeat,
+        modifiers,
+        character,
+    })
 }
 
 // ----------------------------------------------------------------------------
@@ -779,6 +930,15 @@ pub struct Frame {
     /// This preserves the distinction between numpad keys and regular number keys.
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) numpad_keys: Vec<NumpadKeyEvent>,
+
+    /// How numpad keys are intercepted; see [`NumpadCaptureMode`].
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) numpad_capture_mode: NumpadCaptureMode,
+
+    /// If `Some`, only numpad keys whose keybind name is in this set are consumed;
+    /// the rest keep their native behavior. See [`Frame::set_numpad_capture_keys`].
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) numpad_capture_keys: Option<std::collections::HashSet<String>>,
 }
 
 // Implementing `Clone` would violate the guarantees of `HasWindowHandle` and `HasDisplayHandle`.
@@ -824,6 +984,10 @@ impl Frame {
             wgpu_render_state: None,
             #[cfg(not(target_arch = "wasm32"))]
             numpad_keys: Vec::new(),
+            #[cfg(not(target_arch = "wasm32"))]
+            numpad_capture_mode: NumpadCaptureMode::default(),
+            #[cfg(not(target_arch = "wasm32"))]
+            numpad_capture_keys: None,
         }
     }
 
@@ -832,23 +996,25 @@ impl Frame {
     /// These events are captured before egui-winit processes them, preserving
     /// the distinction between numpad keys and regular number keys.
     ///
-    /// Use this to implement numpad-specific keybinds:
-    /// - When `numlock_on` is false, use `keybind_name()` to get the keybind (e.g., "num_1")
-    /// - When `numlock_on` is true, use `to_char()` to get the character for text input
+    /// Only events with `consumed == true` were swallowed by eframe; for those,
+    /// [`NumpadKeyEvent::keybind_name`] returns the keybind to run (e.g. "`num_1`").
+    /// Events with `consumed == false` were also handled normally by egui (e.g.
+    /// the digit was inserted into a focused `TextEdit`), so do not insert text
+    /// for them yourself.
     ///
     /// # Example
     /// ```ignore
-    /// fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+    /// fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
     ///     for key in frame.numpad_keys() {
-    ///         if !key.pressed { continue; }
+    ///         if !key.pressed || key.repeat {
+    ///             continue;
+    ///         }
+    ///         // `keybind_name()` is `Some` only for events eframe consumed
+    ///         // (egui never saw them), so this can't double-act with text input:
     ///         if let Some(name) = key.keybind_name() {
-    ///             // NumLock is off - execute keybind
     ///             if let Some(cmd) = self.keybinds.get(name) {
     ///                 self.execute(cmd);
     ///             }
-    ///         } else if let Some(ch) = key.to_char() {
-    ///             // NumLock is on - insert character
-    ///             self.input.insert(ch);
     ///         }
     ///     }
     /// }
@@ -856,6 +1022,41 @@ impl Frame {
     #[cfg(not(target_arch = "wasm32"))]
     pub fn numpad_keys(&self) -> &[NumpadKeyEvent] {
         &self.numpad_keys
+    }
+
+    /// How numpad keys are currently intercepted; see [`NumpadCaptureMode`].
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn numpad_capture_mode(&self) -> NumpadCaptureMode {
+        self.numpad_capture_mode
+    }
+
+    /// Sets how numpad keys are intercepted; see [`NumpadCaptureMode`].
+    ///
+    /// Can be changed at any time (e.g. from a user setting). On macOS you must
+    /// use [`NumpadCaptureMode::Always`] to get numpad keybinds, since macOS has
+    /// no `NumLock` and numpad digits always arrive as regular digit input otherwise.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn set_numpad_capture_mode(&mut self, mode: NumpadCaptureMode) {
+        self.numpad_capture_mode = mode;
+    }
+
+    /// Restricts capture to the numpad keys the application actually has bindings for.
+    ///
+    /// Pass `Some` with a set of keybind names ("`num_0`" … "`num_9`", "`num_plus`",
+    /// "`num_minus`", "`num_multiply`", "`num_divide`", "`num_enter`", "`num_decimal")`:
+    /// only those keys are consumed for keybinds; all other numpad keys keep their
+    /// native behavior (typing digits, Enter submitting text, navigation, …).
+    /// Pass `None` (the default) to capture every key the mode selects.
+    ///
+    /// Update this whenever the user adds or removes a binding. Combined with
+    /// [`NumpadCaptureMode::Always`] this gives per-key fallback on macOS:
+    /// bound keys run macros, unbound keys still type into whatever is focused.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn set_numpad_capture_keys(
+        &mut self,
+        keys: Option<std::collections::HashSet<String>>,
+    ) {
+        self.numpad_capture_keys = keys;
     }
 
     /// Clears the numpad key events. Called internally after each frame.
@@ -1110,3 +1311,212 @@ pub fn set_value<T: serde::Serialize>(storage: &mut dyn Storage, key: &str, valu
 
 /// [`Storage`] key used for app
 pub const APP_KEY: &str = "app";
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod numpad_tests {
+    use super::{NumpadCaptureMode, NumpadKeyEvent, intercept_numpad_key};
+    use winit::keyboard::{Key, KeyCode, KeyLocation, NamedKey, PhysicalKey, SmolStr};
+
+    fn intercept(
+        code: KeyCode,
+        logical_key: Key,
+        mode: NumpadCaptureMode,
+        capture_keys: Option<&std::collections::HashSet<String>>,
+    ) -> Option<NumpadKeyEvent> {
+        intercept_numpad_key(
+            PhysicalKey::Code(code),
+            &logical_key,
+            KeyLocation::Numpad,
+            true,  // pressed
+            false, // repeat
+            false, // is_synthetic
+            egui::Modifiers::default(),
+            mode,
+            capture_keys,
+        )
+    }
+
+    fn character(s: &str) -> Key {
+        Key::Character(SmolStr::new(s))
+    }
+
+    #[test]
+    fn numlock_off_digit_is_captured() {
+        // NumLock OFF: Numpad7 arrives as the named Home key.
+        let event = intercept(
+            KeyCode::Numpad7,
+            Key::Named(NamedKey::Home),
+            NumpadCaptureMode::NumLockAware,
+            None,
+        )
+        .unwrap();
+        assert!(event.consumed);
+        assert_eq!(event.numlock_on, Some(false));
+        assert_eq!(event.keybind_name(), Some("num_7"));
+        assert_eq!(event.to_char(), None);
+    }
+
+    #[test]
+    fn numlock_on_digit_passes_through() {
+        let event = intercept(
+            KeyCode::Numpad7,
+            character("7"),
+            NumpadCaptureMode::NumLockAware,
+            None,
+        )
+        .unwrap();
+        assert!(!event.consumed);
+        assert_eq!(event.numlock_on, Some(true));
+        assert_eq!(event.keybind_name(), None, "must not fire keybinds for keys egui handled");
+        assert_eq!(event.to_char(), Some('7'));
+    }
+
+    #[test]
+    fn operators_are_always_captured_in_numlock_aware_mode() {
+        let event = intercept(
+            KeyCode::NumpadAdd,
+            character("+"),
+            NumpadCaptureMode::NumLockAware,
+            None,
+        )
+        .unwrap();
+        assert!(event.consumed);
+        assert_eq!(event.numlock_on, None);
+        assert_eq!(event.keybind_name(), Some("num_plus"));
+        assert_eq!(event.to_char(), Some('+'));
+    }
+
+    #[test]
+    fn numpad_enter_is_captured_and_distinguishable() {
+        let event = intercept(
+            KeyCode::NumpadEnter,
+            Key::Named(NamedKey::Enter),
+            NumpadCaptureMode::NumLockAware,
+            None,
+        )
+        .unwrap();
+        assert!(event.consumed);
+        assert_eq!(event.keybind_name(), Some("num_enter"));
+        assert_eq!(event.to_char(), None);
+    }
+
+    #[test]
+    fn always_mode_captures_digits_even_with_numlock_on() {
+        // This is how numpad keybinds work on macOS, which has no NumLock.
+        let event = intercept(
+            KeyCode::Numpad6,
+            character("6"),
+            NumpadCaptureMode::Always,
+            None,
+        )
+        .unwrap();
+        assert!(event.consumed);
+        assert_eq!(event.keybind_name(), Some("num_6"));
+        assert_eq!(event.to_char(), Some('6'));
+    }
+
+    #[test]
+    fn off_mode_intercepts_nothing() {
+        assert!(
+            intercept(
+                KeyCode::Numpad7,
+                Key::Named(NamedKey::Home),
+                NumpadCaptureMode::Off,
+                None,
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn capture_keys_filter_releases_unbound_keys() {
+        let bound: std::collections::HashSet<String> = ["num_6".to_owned()].into();
+
+        // Bound key: captured as usual.
+        let event = intercept(
+            KeyCode::Numpad6,
+            character("6"),
+            NumpadCaptureMode::Always,
+            Some(&bound),
+        )
+        .unwrap();
+        assert!(event.consumed);
+        assert_eq!(event.keybind_name(), Some("num_6"));
+
+        // Unbound key: passes through so it can type normally.
+        let event = intercept(
+            KeyCode::Numpad2,
+            character("2"),
+            NumpadCaptureMode::Always,
+            Some(&bound),
+        )
+        .unwrap();
+        assert!(!event.consumed);
+        assert_eq!(event.keybind_name(), None);
+        assert_eq!(event.to_char(), Some('2'));
+    }
+
+    #[test]
+    fn synthetic_presses_are_ignored() {
+        // Windows sends synthetic presses for keys already held when a window
+        // gains focus; these must not fire keybinds.
+        let event = intercept_numpad_key(
+            PhysicalKey::Code(KeyCode::Numpad7),
+            &Key::Named(NamedKey::Home),
+            KeyLocation::Numpad,
+            true, // pressed
+            false,
+            true, // is_synthetic
+            egui::Modifiers::default(),
+            NumpadCaptureMode::NumLockAware,
+            None,
+        );
+        assert!(event.is_none());
+    }
+
+    #[test]
+    fn non_numpad_keys_are_ignored() {
+        let event = intercept_numpad_key(
+            PhysicalKey::Code(KeyCode::Digit7),
+            &character("7"),
+            KeyLocation::Standard,
+            true,
+            false,
+            false,
+            egui::Modifiers::default(),
+            NumpadCaptureMode::NumLockAware,
+            None,
+        );
+        assert!(event.is_none());
+    }
+
+    #[test]
+    fn locale_decimal_character_is_preserved() {
+        // e.g. German layouts produce ',' for NumpadDecimal.
+        let event = intercept(
+            KeyCode::NumpadDecimal,
+            character(","),
+            NumpadCaptureMode::Always,
+            None,
+        )
+        .unwrap();
+        assert_eq!(event.to_char(), Some(','));
+    }
+
+    #[test]
+    fn repeat_flag_is_propagated() {
+        let event = intercept_numpad_key(
+            PhysicalKey::Code(KeyCode::Numpad8),
+            &Key::Named(NamedKey::ArrowUp),
+            KeyLocation::Numpad,
+            true,
+            true, // repeat
+            false,
+            egui::Modifiers::default(),
+            NumpadCaptureMode::NumLockAware,
+            None,
+        )
+        .unwrap();
+        assert!(event.repeat);
+    }
+}

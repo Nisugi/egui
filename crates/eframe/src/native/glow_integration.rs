@@ -890,72 +890,36 @@ impl GlowWinitRunning<'_> {
             // Intercept numpad key events before egui-winit processes them.
             // This preserves the KeyLocation::Numpad information that egui-winit loses.
             winit::event::WindowEvent::KeyboardInput {
-                event:
-                    winit::event::KeyEvent {
-                        physical_key,
-                        logical_key,
-                        state,
-                        location: winit::keyboard::KeyLocation::Numpad,
-                        ..
-                    },
+                event: key_event,
+                is_synthetic,
                 ..
             } => {
-                use winit::keyboard::{Key, KeyCode, PhysicalKey};
+                // Read modifiers from the viewport's egui-winit state, which tracks
+                // `ModifiersChanged` live (the egui context only updates each pass).
+                let modifiers = viewport_id
+                    .and_then(|id| glutin.viewports.get(&id))
+                    .and_then(|viewport| viewport.egui_winit.as_ref())
+                    .map(|state| state.egui_input().modifiers)
+                    .unwrap_or_default();
 
-                // Check if this is a numpad key we care about
-                let is_numpad_key = matches!(
-                    physical_key,
-                    PhysicalKey::Code(
-                        KeyCode::Numpad0
-                            | KeyCode::Numpad1
-                            | KeyCode::Numpad2
-                            | KeyCode::Numpad3
-                            | KeyCode::Numpad4
-                            | KeyCode::Numpad5
-                            | KeyCode::Numpad6
-                            | KeyCode::Numpad7
-                            | KeyCode::Numpad8
-                            | KeyCode::Numpad9
-                            | KeyCode::NumpadAdd
-                            | KeyCode::NumpadSubtract
-                            | KeyCode::NumpadMultiply
-                            | KeyCode::NumpadDivide
-                            | KeyCode::NumpadEnter
-                            | KeyCode::NumpadDecimal
-                    )
-                );
-
-                if is_numpad_key {
-                    // Operator keys (+, -, *, /) don't change with NumLock - they always produce
-                    // the same character. We treat them as always "NumLock OFF" so they trigger
-                    // keybinds regardless of actual NumLock state.
-                    let is_operator_key = matches!(
-                        physical_key,
-                        PhysicalKey::Code(
-                            KeyCode::NumpadAdd
-                                | KeyCode::NumpadSubtract
-                                | KeyCode::NumpadMultiply
-                                | KeyCode::NumpadDivide
-                        )
-                    );
-
-                    // For digit keys: logical_key is Character when NumLock ON, Named when OFF
-                    // For operator keys: always treat as NumLock OFF (trigger keybinds)
-                    let numlock_on = !is_operator_key && matches!(logical_key, Key::Character(_));
-
-                    let numpad_event = crate::epi::NumpadKeyEvent {
-                        physical_key: *physical_key,
-                        numlock_on,
-                        pressed: *state == winit::event::ElementState::Pressed,
-                        modifiers: self.integration.egui_ctx.input(|i| i.modifiers),
-                    };
-
+                if let Some(numpad_event) = crate::epi::intercept_numpad_key(
+                    key_event.physical_key,
+                    &key_event.logical_key,
+                    key_event.location,
+                    key_event.state == winit::event::ElementState::Pressed,
+                    key_event.repeat,
+                    *is_synthetic,
+                    modifiers,
+                    self.integration.frame.numpad_capture_mode(),
+                    self.integration.frame.numpad_capture_keys.as_ref(),
+                ) {
+                    let consumed = numpad_event.consumed;
                     self.integration.frame.numpad_keys.push(numpad_event);
 
-                    // When NumLock is OFF, consume the event so egui-winit doesn't
-                    // also process it as arrow/navigation keys (which causes double-action)
-                    // When NumLock is ON, let egui-winit process it for character input
-                    if !numlock_on {
+                    // Consumed events must not also reach egui-winit, which would
+                    // process them as arrow/navigation keys (double-action).
+                    // RepaintNow guarantees the app's `update()` runs and sees the event.
+                    if consumed {
                         return EventResult::RepaintNow(window_id);
                     }
                 }
