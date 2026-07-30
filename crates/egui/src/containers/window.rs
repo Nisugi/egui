@@ -89,6 +89,8 @@ pub struct Window<'a> {
     collapsible: bool,
     default_open: bool,
     with_title_bar: bool,
+    title_bar_height: Option<f32>,
+    title_align: Option<Align>,
     fade_out: bool,
     auto_sized: bool,
     drag_area: WindowDrag,
@@ -114,6 +116,8 @@ impl<'a> Window<'a> {
             collapsible: true,
             default_open: true,
             with_title_bar: true,
+            title_bar_height: None,
+            title_align: None,
             fade_out: true,
             auto_sized: false,
             drag_area: WindowDrag::default(),
@@ -471,6 +475,28 @@ impl<'a> Window<'a> {
         self
     }
 
+    /// Exact title bar height in points, independent of the title font size.
+    ///
+    /// The title text keeps its `TextStyle::Heading` size and is vertically
+    /// centered in the bar; heights smaller than the text row are clamped to
+    /// it. `None` (the default) derives the height from the heading font and
+    /// the window margin, as always.
+    #[inline]
+    pub fn title_bar_height(mut self, height: impl Into<Option<f32>>) -> Self {
+        self.title_bar_height = height.into();
+        self
+    }
+
+    /// Horizontal alignment of the title text within the title bar.
+    ///
+    /// Default: centered (between the collapse and close buttons, when
+    /// present).
+    #[inline]
+    pub fn title_align(mut self, align: Align) -> Self {
+        self.title_align = Some(align);
+        self
+    }
+
     /// Not resizable, just takes the size of its contents.
     /// Also disabled scrolling.
     /// Text will not wrap, but will instead make your window width expand.
@@ -554,6 +580,8 @@ impl Window<'_> {
             collapsible,
             default_open,
             with_title_bar,
+            title_bar_height,
+            title_align,
             fade_out,
             auto_sized,
             drag_area: drag_area_setting,
@@ -719,6 +747,8 @@ impl Window<'_> {
                             auto_sized,
                             effective_drag == WindowDrag::TitleBar,
                             area_id,
+                            title_bar_height,
+                            title_align.unwrap_or(Align::Center),
                         );
                     }
                     collapsing
@@ -1287,6 +1317,8 @@ fn title_ui(
     auto_sized: bool,
     drag_to_move: bool,
     area_id: Id,
+    title_bar_height: Option<f32>,
+    title_align: Align,
 ) -> Response {
     let shape_idx = ui.painter().add(Shape::Noop);
 
@@ -1311,7 +1343,11 @@ fn title_ui(
         atoms.push_right(Atom::custom(collapse_atom_id, button_allocation_size));
     }
 
-    atoms.push_right(Atom::grow());
+    // A grow atom on each side centers the title; dropping the leading or
+    // trailing one aligns it left or right instead.
+    if title_align != Align::Min {
+        atoms.push_right(Atom::grow());
+    }
 
     if !auto_sized
         && !title.any_shrink()
@@ -1323,7 +1359,9 @@ fn title_ui(
     }
     atoms.extend_right(title);
 
-    atoms.push_right(Atom::grow());
+    if title_align != Align::Max {
+        atoms.push_right(Atom::grow());
+    }
 
     if open.is_some() {
         atoms.push_right(Atom::custom(close_atom_id, button_allocation_size));
@@ -1333,11 +1371,24 @@ fn title_ui(
 
     let mut child_ui = ui.new_child(UiBuilder::new());
 
+    // An explicit bar height replaces the window margin's vertical padding
+    // with whatever centers the heading row in the requested height; the bar
+    // never shrinks below the text row itself.
+    let title_margin = if let Some(height) = title_bar_height {
+        let pad = ((height - heading_font_height) / 2.0).max(0.0);
+        let mut margin = frame.inner_margin;
+        margin.top = pad.round() as i8;
+        margin.bottom = pad.round() as i8;
+        margin
+    } else {
+        frame.inner_margin
+    };
+
     let mut layout = AtomLayout::new(atoms)
         .gap(spacing)
         .fallback_font(TextStyle::Heading)
         .wrap_mode(TextWrapMode::Truncate)
-        .frame(Frame::NONE.inner_margin(frame.inner_margin));
+        .frame(Frame::NONE.inner_margin(title_margin));
 
     let frame = frame.inner_margin(0); // Only applied to the atoms; done above.
 
