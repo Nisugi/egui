@@ -1000,7 +1000,23 @@ fn resize_response(
     };
 
     if area.constrain() {
-        new_rect = Context::constrain_window_rect_to_area(new_rect, area.constrain_rect());
+        let bounds = area.constrain_rect();
+        // Clamp each DRAGGED edge to the bounds first: dragging an edge into
+        // the wall must stop that edge there, never translate the window so
+        // the opposite (un-dragged) edge drifts away.
+        if resize_interaction.left.drag {
+            new_rect.min.x = new_rect.min.x.at_least(bounds.left());
+        }
+        if resize_interaction.right.drag {
+            new_rect.max.x = new_rect.max.x.at_most(bounds.right());
+        }
+        if resize_interaction.top.drag {
+            new_rect.min.y = new_rect.min.y.at_least(bounds.top());
+        }
+        if resize_interaction.bottom.drag {
+            new_rect.max.y = new_rect.max.y.at_most(bounds.bottom());
+        }
+        new_rect = Context::constrain_window_rect_to_area(new_rect, bounds);
     }
 
     // TODO(emilk): add this to a Window state instead as a command "move here next frame"
