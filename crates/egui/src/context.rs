@@ -385,6 +385,10 @@ struct ContextImpl {
     /// Set during the pass, becomes active at the start of the next pass.
     new_zoom_factor: Option<f32>,
 
+    /// The viewports drawn at a zoom factor of their own, in place of the
+    /// global [`Options::zoom_factor`]. See [`Context::set_viewport_zoom_factor`].
+    viewport_zoom_factors: ViewportIdMap<f32>,
+
     os: OperatingSystem,
 
     /// How deeply nested are we?
@@ -445,7 +449,12 @@ impl ContextImpl {
             .viewport()
             .native_pixels_per_point
             .unwrap_or(1.0);
-        let pixels_per_point = self.memory.options.zoom_factor * native_pixels_per_point;
+        let zoom_factor = self
+            .viewport_zoom_factors
+            .get(&viewport_id)
+            .copied()
+            .unwrap_or(self.memory.options.zoom_factor);
+        let pixels_per_point = zoom_factor * native_pixels_per_point;
 
         let all_viewport_ids: ViewportIdSet = self.all_viewport_ids();
 
@@ -2275,6 +2284,46 @@ impl Context {
                 for viewport_id in ctx.all_viewport_ids() {
                     ctx.request_repaint(viewport_id, cause.clone());
                 }
+            }
+        });
+    }
+
+    /// The zoom factor the viewport `viewport_id` is drawn at: its own, where
+    /// [`Self::set_viewport_zoom_factor`] gave it one, else the global
+    /// [`Self::zoom_factor`].
+    pub fn viewport_zoom_factor(&self, viewport_id: ViewportId) -> f32 {
+        self.read(|ctx| {
+            ctx.viewport_zoom_factors
+                .get(&viewport_id)
+                .copied()
+                .unwrap_or(ctx.memory.options.zoom_factor)
+        })
+    }
+
+    /// Draw the viewport `viewport_id` at a zoom factor of its own, in place
+    /// of the global [`Self::zoom_factor`]; `None` draws it at the global one
+    /// again.
+    ///
+    /// It takes effect at the viewport's next pass: for an immediate viewport
+    /// shown after this call, in this one. The viewport's window keeps its
+    /// size and its place, which stay in the global zoom's points (its
+    /// [`crate::ViewportInfo`], the sizes a [`ViewportBuilder`] or a
+    /// [`ViewportCommand`] gives it); only what is drawn in it grows or
+    /// shrinks, and pointer input in it is read at its own zoom.
+    pub fn set_viewport_zoom_factor(&self, viewport_id: ViewportId, zoom_factor: Option<f32>) {
+        let cause = RepaintCause::new();
+        self.write(|ctx| {
+            let before = ctx.viewport_zoom_factors.get(&viewport_id).copied();
+            if before != zoom_factor {
+                match zoom_factor {
+                    Some(zoom_factor) => {
+                        ctx.viewport_zoom_factors.insert(viewport_id, zoom_factor);
+                    }
+                    None => {
+                        ctx.viewport_zoom_factors.remove(&viewport_id);
+                    }
+                }
+                ctx.request_repaint(viewport_id, cause);
             }
         });
     }
@@ -4416,5 +4465,22 @@ mod test {
                 "The request should have been cleared when fulfilled"
             );
         }
+    }
+
+    /// A viewport drawn at a zoom of its own is drawn at it, the global one
+    /// left as it was; none gives it the global one again.
+    #[test]
+    fn a_viewport_zoom_of_its_own() {
+        use crate::ViewportId;
+        let ctx = Context::default();
+        ctx.set_viewport_zoom_factor(ViewportId::ROOT, Some(2.0));
+        let _ = ctx.run_ui(Default::default(), |_| {});
+        assert_eq!(ctx.pixels_per_point(), 2.0);
+        assert_eq!(ctx.zoom_factor(), 1.0, "the global zoom untouched");
+        assert_eq!(ctx.viewport_zoom_factor(ViewportId::ROOT), 2.0);
+        ctx.set_viewport_zoom_factor(ViewportId::ROOT, None);
+        let _ = ctx.run_ui(Default::default(), |_| {});
+        assert_eq!(ctx.pixels_per_point(), 1.0);
+        assert_eq!(ctx.viewport_zoom_factor(ViewportId::ROOT), 1.0);
     }
 }

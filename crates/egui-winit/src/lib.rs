@@ -123,6 +123,15 @@ pub struct State {
 }
 
 impl State {
+    /// Pixels per point in this state's viewport: its own zoom factor, where
+    /// egui draws it at one ([`egui::Context::set_viewport_zoom_factor`]),
+    /// else the global one, over the window's scale. What the viewport's
+    /// input is read at; its window's size and place stay in the global
+    /// zoom's points ([`pixels_per_point`]).
+    fn viewport_pixels_per_point(&self, window: &Window) -> f32 {
+        self.egui_ctx.viewport_zoom_factor(self.viewport_id) * window.scale_factor() as f32
+    }
+
     /// Construct a new instance
     pub fn new(
         egui_ctx: egui::Context,
@@ -257,8 +266,7 @@ impl State {
         // See: https://github.com/rust-windowing/winit/issues/208
         // This solves an issue where egui window positions would be changed when minimizing on Windows.
         let screen_size_in_pixels = screen_size_in_pixels(window);
-        let screen_size_in_points =
-            screen_size_in_pixels / pixels_per_point(&self.egui_ctx, window);
+        let screen_size_in_points = screen_size_in_pixels / self.viewport_pixels_per_point(window);
 
         self.egui_input.screen_rect = (screen_size_in_points.x > 0.0
             && screen_size_in_points.y > 0.0)
@@ -535,7 +543,7 @@ impl State {
             }
 
             WindowEvent::PanGesture { delta, phase, .. } => {
-                let pixels_per_point = pixels_per_point(&self.egui_ctx, window);
+                let pixels_per_point = self.viewport_pixels_per_point(window);
 
                 self.egui_input.events.push(egui::Event::MouseWheel {
                     unit: egui::MouseWheelUnit::Point,
@@ -826,7 +834,7 @@ impl State {
         window: &Window,
         pos_in_pixels: winit::dpi::PhysicalPosition<f64>,
     ) {
-        let pixels_per_point = pixels_per_point(&self.egui_ctx, window);
+        let pixels_per_point = self.viewport_pixels_per_point(window);
 
         let pos_in_points = egui::pos2(
             pos_in_pixels.x as f32 / pixels_per_point,
@@ -856,7 +864,7 @@ impl State {
     }
 
     fn on_touch(&mut self, window: &Window, touch: &winit::event::Touch) {
-        let pixels_per_point = pixels_per_point(&self.egui_ctx, window);
+        let pixels_per_point = self.viewport_pixels_per_point(window);
 
         // Emit touch event
         self.egui_input.events.push(egui::Event::Touch {
@@ -921,7 +929,7 @@ impl State {
         delta: winit::event::MouseScrollDelta,
         phase: winit::event::TouchPhase,
     ) {
-        let pixels_per_point = pixels_per_point(&self.egui_ctx, window);
+        let pixels_per_point = self.viewport_pixels_per_point(window);
 
         {
             let (unit, delta) = match delta {
@@ -1143,7 +1151,7 @@ impl State {
                 window.set_ime_allowed(true);
             }
 
-            let pixels_per_point = pixels_per_point(&self.egui_ctx, window);
+            let pixels_per_point = self.viewport_pixels_per_point(window);
             let ime_rect_px = pixels_per_point * ime.rect;
             if self.ime_rect_px != Some(ime_rect_px)
                 || self.egui_ctx.input(|i| !i.events.is_empty())
