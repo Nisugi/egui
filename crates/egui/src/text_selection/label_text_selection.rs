@@ -572,7 +572,10 @@ impl ViewportLabelSelectionState {
                 process_selection_key_events(ui.ctx(), galley, response.id, &mut cursor_range);
             }
 
-            if got_copy_event(ui.ctx()) {
+            // Only a real selection is copied: a bare caret from a click or a
+            // hover would otherwise copy the whole label on Ctrl+C, even with
+            // nothing highlighted.
+            if got_copy_event(ui.ctx()) && !cursor_range.is_empty() {
                 self.copy_text(galley_rect, galley, &cursor_range);
             }
 
