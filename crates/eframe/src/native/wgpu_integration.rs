@@ -1081,11 +1081,11 @@ fn create_window(
     Ok((window, viewport_builder))
 }
 
-/// Is this viewport, or any of its (transitive) descendant viewports, visible?
+/// Must this viewport's UI run: is it visible, or does it have child viewports?
 ///
 /// Immediate viewports are rendered inline while their parent's UI runs, so even
 /// if this viewport's window is occluded or minimized we must still run its UI to
-/// give any visible descendant a chance to be painted.
+/// keep its children alive and give them a chance to be painted.
 fn is_viewport_or_descendant_visible(viewports: &Viewports, viewport_id: ViewportId) -> bool {
     let Some(viewport) = viewports.get(&viewport_id) else {
         return false;
@@ -1093,11 +1093,12 @@ fn is_viewport_or_descendant_visible(viewports: &Viewports, viewport_id: Viewpor
     if viewport.info.visible().unwrap_or(true) {
         return true;
     }
-    viewports.values().any(|child| {
-        child.ids.parent == viewport_id
-            && child.ids.this != viewport_id
-            && is_viewport_or_descendant_visible(viewports, child.ids.this)
-    })
+    // A child not shown in a pass is dropped by egui and its window closed,
+    // so a viewport with children always runs its UI: macOS reports every
+    // window hidden while one of them moves to its own full-screen space.
+    viewports
+        .values()
+        .any(|child| child.ids.parent == viewport_id && child.ids.this != viewport_id)
 }
 
 fn render_immediate_viewport(
